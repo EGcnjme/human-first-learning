@@ -1,0 +1,568 @@
+# RQ2
+## Part 1
+```{r}
+# ── 1. Load packages ──────────────────────────────────────────────────
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(rstatix)
+library(ggsci)
+library(showtext)
+library(dplyr)
+library(openxlsx)
+showtext_auto()
+
+# ── 2. Read data ──────────────────────────────────────────────────────
+data <- read_excel("Dataset.xlsx", sheet = "data_cognitiveload_meta_Groupby")
+
+
+wb <- createWorkbook()
+write_sheet <- function(wb, sheet_name, df) {
+  sheet_name <- substr(sheet_name, 1, 31)   
+  if (!(sheet_name %in% names(wb))) {
+    addWorksheet(wb, sheet_name)
+  }
+  writeData(wb, sheet = sheet_name, x = df)
+}
+
+# ── 3. General mixed ANOVA function ）──────────────────────────────
+run_mixed_anova <- function(df, prefix, suffixes) {
+  
+  col_names <- paste0(prefix, "_", suffixes)
+  
+  df_clean <- df %>%
+    dplyr::select(Username, Group, all_of(col_names)) %>%
+    drop_na() %>%
+    pivot_longer(
+      cols      = all_of(col_names),
+      names_to  = "Raw_Time",
+      values_to = "Score"
+    ) %>%
+    mutate(
+      Time = case_when(
+        Raw_Time == col_names[1] ~ "T1",
+        Raw_Time == col_names[2] ~ "T2",
+        Raw_Time == col_names[3] ~ "T3",
+        Raw_Time == col_names[4] ~ "T4"
+      ),
+      Username = as.factor(Username),
+      Group    = droplevels(as.factor(Group)),
+      Time     = factor(Time, levels = c("T1","T2","T3","T4"))
+    )
+  
+  # ── 3a. Descriptive statistics ──────────────────────────────────────────────────
+  desc <- df_clean %>%
+    group_by(Group, Time) %>%
+    summarise(
+      n    = n(),
+      M    = round(mean(Score, na.rm = TRUE), 3),
+      SD   = round(sd(Score,   na.rm = TRUE), 3),
+      SE   = round(SD / sqrt(n), 3),
+      .groups = "drop"
+    )
+  
+  write_sheet(wb, paste0(prefix, "_Descriptives"), as.data.frame(desc))
+  
+  cat("\n======================================================\n")
+  cat("Variable: [", prefix, "]\n")
+  cat("Valid sample size N =", length(unique(df_clean$Username)), "\n")
+  cat("======================================================\n")
+  cat("\n>>> Descriptive statistics (Group x Time)\n")
+  print(as.data.frame(desc))
+  print(as.data.frame(desc))
+  
+  # ── 3b. Mixed ANOVA ──────────────────────────────────────────────
+  res_anova <- anova_test(
+    data    = df_clean,
+    dv      = Score,
+    wid     = Username,
+    between = Group,
+    within  = Time,
+    effect.size = "pes"
+  )
+  
+  anova_table <- get_anova_table(res_anova) %>% as.data.frame()
+  
+  write_sheet(wb, paste0(prefix, "_MixedANOVA"), anova_table)
+  
+  cat("\n>>> Mixed ANOVA results (with partial eta squared)\n")
+  print(anova_table)
+  
+  # -- 3c. Sphericity test ---------------------------------------------
+  cat("\n>>> Mauchly's Test for Sphericity\n")
+  if ("Mauchly's Test for Sphericity" %in% names(res_anova)) {
+    mauchly_df <- as.data.frame(res_anova[["Mauchly's Test for Sphericity"]])
+    print(mauchly_df)
+    
+    sheet_name    <- substr(paste0(prefix, "_MixedANOVA"), 1, 31)
+    existing_rows <- nrow(anova_table) + 2
+    writeData(wb, sheet = sheet_name,
+              x = data.frame(Note = "Mauchly's Test for Sphericity"),
+              startRow = existing_rows + 2)
+    writeData(wb, sheet = sheet_name,
+              x = mauchly_df,
+              startRow = existing_rows + 3)
+    cat("  Note: If p < .05, sphericity is violated; Greenhouse-Geisser correction is applied automatically.\n")
+  } else {
+    cat("  (No sphericity test result detected; degrees of freedom may be 1.)\n")
+  }
+  
+  return(invisible(df_clean))
+}
+
+# -- 4. Time point suffixes --------------------------------------------
+suffixes_standard <- c("task2","task4","task6","task7")
+
+# -- 5. Run mixed ANOVA in batch ---------------------------------------
+standard_vars   <- c("ICL","GCL","ECL","Kn","Ob","Pr","Mo","Ev")
+clean_data_list <- list()
+
+for (var in standard_vars) {
+  clean_data_list[[var]] <- run_mixed_anova(data, var, suffixes_standard)
+}
+```
+
+## Part 2
+```{r}
+# =====================================================================
+# Part 2: Interaction NOT significant -- pairwise comparisons of time
+# =====================================================================
+vars_no_int <- c("GCL","ECL","Kn","Pr","Mo")
+
+all_no_int_pwc <- list()
+
+for (var in vars_no_int) {
+  cat("\n======================================================\n")
+  cat("[No interaction] [", var, "] - Pairwise comparisons of time main effect (BH correction, 6 pairs)\n")
+  cat("======================================================\n")
+  
+  df <- clean_data_list[[var]]
+  
+  pwc_time <- df %>%
+    pairwise_t_test(
+      Score ~ Time,
+      paired          = TRUE,
+      p.adjust.method = "BH"
+    )
+  
+  result_df <- as.data.frame(pwc_time %>%
+    dplyr::select(group1, group2, statistic, df, p, p.adj, p.adj.signif))
+  
+  result_df <- cbind(Variable = var, result_df)
+  all_no_int_pwc[[var]] <- result_df
+  
+  print(result_df)
+}
+
+all_no_int_combined <- do.call(rbind, all_no_int_pwc)
+write_sheet(wb, "NoInt_Time_Pairwise", all_no_int_combined)
+
+
+# =====================================================================
+# Part 3: Interaction significant -- simple main effects analysis
+# =====================================================================
+vars_int <- c("ICL","Ob","Ev")
+
+all_sme_group_list <- list()
+all_sme_time_list  <- list()
+
+for (var in vars_int) {
+  cat("\n======================================================\n")
+  cat("[Significant interaction] [", var, "] - Simple main effects analysis\n")
+  cat("======================================================\n")
+  
+  df <- clean_data_list[[var]]
+  n_time  <- 4
+  n_group <- length(unique(df$Group))
+  
+  # -- Perspective A: fix time, examine group differences --------------
+  cat("\n---> Perspective A: Group differences at each time point\n")
+  
+  sme_group <- df %>%
+    group_by(Time) %>%
+    anova_test(dv = Score, wid = Username, between = Group,
+               effect.size = "pes") %>%
+    get_anova_table() %>%
+    as.data.frame() %>%
+    mutate(
+      p.adj        = p.adjust(p, method = "BH", n = n_time),
+      p.adj.signif = case_when(
+        p.adj < .001 ~ "***",
+        p.adj < .01  ~ "**",
+        p.adj < .05  ~ "*",
+        TRUE         ~ "ns"
+      )
+    )
+  
+  all_sme_group_list[[var]] <- cbind(Variable = var, sme_group)
+  print(as.data.frame(sme_group))
+  
+  # -- Perspective B: fix group, examine time changes ------------------
+  cat("\n---> Perspective B: Time changes within each group\n")
+  
+  sme_time <- df %>%
+    group_by(Group) %>%
+    anova_test(dv = Score, wid = Username, within = Time,
+               effect.size = "pes") %>%
+    get_anova_table() %>%
+    as.data.frame() %>%
+    mutate(
+      p.adj        = p.adjust(p, method = "BH", n = n_group),
+      p.adj.signif = case_when(
+        p.adj < .001 ~ "***",
+        p.adj < .01  ~ "**",
+        p.adj < .05  ~ "*",
+        TRUE         ~ "ns"
+      )
+    )
+  
+  all_sme_time_list[[var]] <- cbind(Variable = var, sme_time)
+  print(as.data.frame(sme_time))
+}
+
+all_sme_group_combined <- do.call(rbind, all_sme_group_list)
+all_sme_time_combined  <- do.call(rbind, all_sme_time_list)
+write_sheet(wb, "Int_SME_Group", all_sme_group_combined)
+write_sheet(wb, "Int_SME_Time",  all_sme_time_combined)
+
+
+# =====================================================================
+# Part 4: Detailed pairwise comparisons (significant interaction)
+# =====================================================================
+all_pwc_group_list <- list()
+all_pwc_time_list  <- list()
+
+for (var in vars_int) {
+  cat("\n======================================================\n")
+  cat("[Significant interaction] [", var, "] - Detailed pairwise comparisons\n")
+  cat("======================================================\n")
+  
+  df <- clean_data_list[[var]]
+  
+  # -- Perspective A: fix time point, pairwise group comparisons -------
+  cat("\n---> Perspective A: Pairwise group comparisons within each time point\n")
+  
+  pwc_group <- df %>%
+    group_by(Time) %>%
+    pairwise_t_test(
+      Score ~ Group,
+      paired          = FALSE,
+      p.adjust.method = "BH"
+    ) %>%
+    as.data.frame()
+  
+  cols_A_all <- intersect(
+    c("Time", "group1", "group2", "n1", "n2", "statistic", "df", "p", "p.adj", "p.adj.signif"),
+    colnames(pwc_group)
+  )
+  
+  all_pwc_group_list[[var]] <- cbind(Variable = var, pwc_group[, cols_A_all])
+  
+  cat("  [All results]\n")
+  print(pwc_group[, cols_A_all])
+  cat("  [Significant results only (p.adj < .05)]\n")
+  sig_A <- pwc_group %>% filter(p.adj < 0.05)
+  if (nrow(sig_A) > 0) {
+    cols_A_sig <- intersect(
+      c("Time", "group1", "group2", "statistic", "df", "p", "p.adj", "p.adj.signif"),
+      colnames(sig_A)
+    )
+    print(sig_A[, cols_A_sig])
+  } else {
+    cat("  (No significant group differences after BH correction)\n")
+  }
+  
+  # -- Perspective B: fix group, pairwise time point comparisons -------
+  cat("\n---> Perspective B: Pairwise time point comparisons within each group\n")
+  
+  pwc_time <- df %>%
+    group_by(Group) %>%
+    pairwise_t_test(
+      Score ~ Time,
+      paired          = TRUE,
+      p.adjust.method = "BH"
+    ) %>%
+    as.data.frame()
+  
+  cols_B_all <- intersect(
+    c("Group", "group1", "group2", "n1", "n2", "statistic", "df", "p", "p.adj", "p.adj.signif"),
+    colnames(pwc_time)
+  )
+  
+  all_pwc_time_list[[var]] <- cbind(Variable = var, pwc_time[, cols_B_all])
+  
+  cat("  [All results]\n")
+  print(pwc_time[, cols_B_all])
+  cat("  [Significant results only (p.adj < .05)]\n")
+  sig_B <- pwc_time %>% filter(p.adj < 0.05)
+  if (nrow(sig_B) > 0) {
+    cols_B_sig <- intersect(
+      c("Group", "group1", "group2", "statistic", "df", "p", "p.adj", "p.adj.signif"),
+      colnames(sig_B)
+    )
+    print(sig_B[, cols_B_sig])
+  } else {
+    cat("  (No significant time point differences after BH correction)\n")
+  }
+}
+
+all_pwc_group_combined <- do.call(rbind, all_pwc_group_list)
+all_pwc_time_combined  <- do.call(rbind, all_pwc_time_list)
+write_sheet(wb, "Int_Pairwise_Group", all_pwc_group_combined)
+write_sheet(wb, "Int_Pairwise_Time",  all_pwc_time_combined)
+
+
+# =====================================================================
+# Save Excel file
+# =====================================================================
+saveWorkbook(wb, "Mixed_ANOVA_Results_Summary.xlsx", overwrite = TRUE)
+cat("\n\n✅ Excel file saved: Mixed_ANOVA_Results_Summary.xlsx\n")
+cat("Sheets included:\n")
+cat(paste(" -", names(wb)), sep = "\n")
+
+```
+
+
+# Draw pictures
+```{r}
+library(showtext)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggtext)          
+
+font_add(
+  family     = "Arial",
+  regular    = "/Library/Fonts/Arial.ttf",
+  bold       = "/Library/Fonts/Arial Bold.ttf",
+  italic     = "/Library/Fonts/Arial Italic.ttf",
+  bolditalic = "/Library/Fonts/Arial Bold Italic.ttf"
+)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+draw_order <- c("cn", "ai", "sf", "sf-ai", "ai-sf", "ai+sf")
+
+layer_colors <- c(
+  "cn"    = "#3AA66E",
+  "ai"    = "#AA2B46",
+  "sf"    = "#4A90C4",
+  "sf-ai" = "#3B5DA3",
+  "ai-sf" = "#E58760",
+  "ai+sf" = "#D4B84A"
+)
+
+facet_labels <- c(
+  "cn"    = "CN",
+  "ai"    = "ASST",
+  "sf"    = "SF",
+  "sf-ai" = "SF-ASST",
+  "ai-sf" = "ASST-SF",
+  "ai+sf" = "SF+ASST"
+)
+
+base_pt <- 8
+
+y_breaks_ICL <- seq(9.0,  14.0, by = 1.0); y_lower_ICL <- 9.0;  y_upper_ICL <- 14.0
+y_breaks_Ob  <- seq(17.0, 22.0, by = 1.0); y_lower_Ob  <- 17.0; y_upper_Ob  <- 22.0
+y_breaks_Ev  <- seq(17.0, 22.0, by = 1.0); y_lower_Ev  <- 17.0; y_upper_Ev  <- 22.0
+
+y_breaks_cog  <- seq(9.0,  16.5, by = 1.0); y_lower_cog  <- 9.0;  y_upper_cog  <- 16.5
+y_breaks_meta <- seq(10.0, 22.0, by = 2.0); y_lower_meta <- 10.0; y_upper_meta <- 22.0
+
+
+make_panel <- function(var_name, y_label,
+                       sig_df   = NULL,
+                       y_breaks = NULL,
+                       y_lower  = NULL,
+                       y_upper  = NULL,
+                       y_pad_top = 0.3) {
+
+  df_var <- clean_data_list[[var_name]] %>%
+    mutate(
+      Group    = factor(Group, levels = draw_order),
+      Time_num = as.numeric(gsub("T", "", as.character(Time)))
+    )
+
+  desc <- df_var %>%
+    group_by(Group, Time_num) %>%
+    summarise(
+      Mean  = mean(Score, na.rm = TRUE),
+      SE    = sd(Score, na.rm = TRUE) / sqrt(n()),
+      CI_lo = Mean - qt(0.975, n() - 1) * SE,
+      CI_hi = Mean + qt(0.975, n() - 1) * SE,
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Group       = factor(Group, levels = draw_order),
+      facet_label = factor(
+        facet_labels[as.character(Group)],
+        levels = facet_labels[draw_order]
+      )
+    )
+
+  y_upper_data <- max(desc$CI_hi, na.rm = TRUE)
+  if (is.null(y_lower))  y_lower  <- min(desc$CI_lo, na.rm = TRUE) - 0.3
+  if (is.null(y_breaks)) y_breaks <- pretty(c(y_lower, y_upper_data + 1), n = 5)
+  if (is.null(y_upper))  y_upper  <- y_upper_data + y_pad_top
+
+  y_range <- y_upper - y_lower
+
+  has_sig <- !is.null(sig_df) && nrow(sig_df) > 0
+
+  if (has_sig) {
+    sig_df <- sig_df %>%
+      mutate(
+        Group = factor(Group, levels = draw_order),
+        span  = x2 - x1
+      ) %>%
+      group_by(Group) %>%
+      arrange(desc(span), x1, .by_group = TRUE) %>%
+      mutate(rank = row_number()) %>%
+      ungroup() %>%
+      mutate(
+        y_pos = y_upper - y_range * 0.07 * rank,
+        facet_label = factor(
+          facet_labels[as.character(Group)],
+          levels = facet_labels[draw_order]
+        )
+      )
+  }
+
+  all_facets <- desc %>% select(facet_label) %>% distinct()
+  all_bg     <- desc %>%
+    select(Group_bg = Group, Time_num, Mean, facet_label_bg = facet_label)
+  bg_lines <- crossing(all_facets, all_bg) %>%
+    filter(as.character(facet_label) != as.character(facet_label_bg))
+
+  p <- ggplot(desc, aes(x = Time_num, y = Mean)) +
+    geom_line(
+      data = bg_lines,
+      aes(x = Time_num, y = Mean, group = Group_bg),
+      color = "gray85", linewidth = 0.35, inherit.aes = FALSE
+    ) +
+    geom_errorbar(
+      aes(ymin = CI_lo, ymax = CI_hi, color = Group),
+      width = 0.12, linewidth = 0.4, alpha = 0.8
+    ) +
+    geom_line(aes(color = Group, group = Group), linewidth = 0.9) +
+    geom_point(aes(color = Group), size = 2.2, shape = 21,
+               fill = "white", stroke = 0.6) +
+    facet_wrap(~ facet_label, nrow = 1, ncol = 6, scales = "fixed") +
+    scale_color_manual(values = layer_colors, guide = "none") +
+    scale_x_continuous(breaks = 1:4, labels = paste0("P", 1:4),
+                       expand = c(0.08, 0.08)) +
+    scale_y_continuous(breaks = y_breaks,
+                       limits = c(y_lower, y_upper),
+                       oob    = scales::squish) +
+    labs(x = NULL, y = y_label) +
+    theme_classic(base_size = base_pt, base_family = "Arial") +
+    theme(
+      axis.title.y       = element_text(size = base_pt, family = "Arial",
+                                        color = "black", angle = 90,
+                                        margin = margin(r = 3)),
+      axis.title.x       = element_blank(),
+      axis.text          = element_text(size = base_pt - 1, family = "Arial",
+                                        color = "black"),
+      axis.line          = element_line(linewidth = 0.3, color = "black"),
+      axis.ticks         = element_line(linewidth = 0.3, color = "black"),
+      panel.grid.major.y = element_line(color = "gray92", linetype = "dotted",
+                                        linewidth = 0.3),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor   = element_blank(),
+      strip.background   = element_blank(),
+      strip.text         = element_text(size = base_pt, family = "Arial",
+                                        color = "black", face = "bold",
+                                        hjust = 0.5),
+      panel.spacing      = unit(0.35, "cm"),
+      plot.margin        = margin(2, 4, 2, 4, "pt")
+    )
+
+  if (has_sig) {
+    tick_len <- y_range * 0.012
+    text_off <- y_range * 0.006
+    p <- p +
+      geom_segment(data = sig_df,
+        aes(x = x1, xend = x2, y = y_pos, yend = y_pos),
+        color = "black", linewidth = 0.3, inherit.aes = FALSE) +
+      geom_segment(data = sig_df,
+        aes(x = x1, xend = x1, y = y_pos - tick_len, yend = y_pos),
+        color = "black", linewidth = 0.3, inherit.aes = FALSE) +
+      geom_segment(data = sig_df,
+        aes(x = x2, xend = x2, y = y_pos - tick_len, yend = y_pos),
+        color = "black", linewidth = 0.3, inherit.aes = FALSE) +
+      geom_text(data = sig_df,
+        aes(x = (x1 + x2) / 2, y = y_pos + text_off, label = label),
+        size = 1.8, family = "Arial", vjust = 0, inherit.aes = FALSE)
+  }
+
+  return(p)
+}
+
+
+sig_ICL <- tribble(
+  ~Group,   ~x1, ~x2, ~label,
+  "ai+sf",    1,   4,  "*",
+  "sf",       1,   4,  "*",
+  "sf",       2,   4,  "***",
+  "sf",       3,   4,  "*",
+  "sf-ai",    2,   3,  "**",
+  "sf-ai",    2,   4,  "***"
+)
+
+sig_Ob <- tribble(
+  ~Group,  ~x1, ~x2, ~label,
+  "cn",      1,   2,  "*",
+  "cn",      1,   3,  "**",
+  "cn",      1,   4,  "**"
+)
+
+sig_Ev <- tribble(
+  ~Group,   ~x1, ~x2, ~label,
+  "sf-ai",    2,   3,  "*",
+  "sf-ai",    2,   4,  "*"
+)
+
+
+p_a <- make_panel("ICL", "Intrinsic Cognitive Load", sig_ICL, y_breaks_ICL, y_lower_ICL, y_upper_ICL)
+p_b <- make_panel("Ob",  "Objectives",  sig_Ob,  y_breaks_Ob,  y_lower_Ob,  y_upper_Ob)
+p_c <- make_panel("Ev",  "Evaluation",  sig_Ev,  y_breaks_Ev,  y_lower_Ev,  y_upper_Ev)
+
+fig_combined <- (p_a / p_b / p_c) +
+  plot_layout(heights = c(1, 1, 1)) +
+  plot_annotation(
+    tag_levels = "a",
+    tag_prefix = "**",     
+    tag_suffix = "**"      
+  ) &
+  theme(
+    plot.tag = element_markdown(  
+      size   = base_pt + 2,
+      family = "Arial",
+      hjust  = 0,
+      vjust  = 1
+    ),
+    plot.margin = margin(t = 10, r = 4, b = 2, l = 4, unit = "pt")
+  )
+
+ggsave("Fig_ICL_Ob_Ev.png",
+       plot   = fig_combined,
+       width  = 183 / 25.4,
+       height = 170 / 25.4,
+       dpi    = 600, units = "in")
+ggsave("Fig_ICL_Ob_Ev.pdf",
+       plot   = fig_combined,
+       width  = 183 / 25.4,
+       height = 170 / 25.4,
+       device = "pdf", units = "in")
+cat("Saved：Fig_ICL_Ob_Ev.png / .pdf\n")
+
+
+```
+
+
+
+
+
+

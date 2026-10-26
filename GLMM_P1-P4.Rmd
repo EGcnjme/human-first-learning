@@ -1,0 +1,1185 @@
+# RQ1.1: human vs. human/AI
+```{r}
+# ══════════════════════════════════════════════════════════════
+# 0. Load packages
+# ══════════════════════════════════════════════════════════════
+library(tidyverse)
+library(readxl)
+library(lme4)
+library(emmeans)
+library(car)
+library(performance)
+
+# ══════════════════════════════════════════════════════════════
+# 1. Read data (two sheets from the same file)
+# ══════════════════════════════════════════════════════════════
+human_raw <- read_excel("Dataset.xlsx", sheet = "accuracy_human")
+agent_raw <- read_excel("Dataset.xlsx", sheet = "performance_agent")
+
+# ══════════════════════════════════════════════════════════════
+# 2. Clean human data
+# ══════════════════════════════════════════════════════════════
+human_df <- human_raw %>%
+  rename(
+    subject_id = student_id,
+    score      = correct
+  ) %>%
+  mutate(
+    group = tolower(group),
+    group = factor(
+      group,
+      levels = c("cn", "ai", "sf", "ai+sf", "sf-ai", "ai-sf")
+    ),
+    phase = case_when(
+      case %in% c(1, 2) ~ "Phase1_Baseline",
+      case %in% c(3, 4) ~ "Phase2_PreInt",
+      case %in% c(5, 6) ~ "Phase3_PostInt",
+      case == 7         ~ "Phase4_Withdrawal"
+    ),
+    phase = factor(
+      phase,
+      levels = c(
+        "Phase1_Baseline",
+        "Phase2_PreInt",
+        "Phase3_PostInt",
+        "Phase4_Withdrawal"
+      )
+    ),
+    case  = factor(case),
+    score = as.integer(score)
+  )
+
+# ══════════════════════════════════════════════════════════════
+# 3. Clean Agent data
+# ══════════════════════════════════════════════════════════════
+agent_df <- agent_raw %>%
+  dplyr::select(Model, case, session_id, Accuracy) %>%
+  rename(
+    model   = Model,
+    case    = case,
+    session = session_id,
+    score   = Accuracy
+  ) %>%
+  mutate(
+    phase = case_when(
+      case %in% c(1, 2) ~ "Phase1_Baseline",
+      case %in% c(3, 4) ~ "Phase2_PreInt",
+      case %in% c(5, 6) ~ "Phase3_PostInt",
+      case == 7         ~ "Phase4_Withdrawal"
+    ),
+    phase = factor(
+      phase,
+      levels = c(
+        "Phase1_Baseline",
+        "Phase2_PreInt",
+        "Phase3_PostInt",
+        "Phase4_Withdrawal"
+      )
+    ),
+    case  = factor(case),
+    score = as.integer(score)
+  )
+
+# ══════════════════════════════════════════════════════════════
+# 4. Combine data (for Analysis 2: includes Agent, excludes CN)
+# ══════════════════════════════════════════════════════════════
+agent_combined <- agent_df %>%
+  dplyr::select(phase, case, score) %>%
+  mutate(
+    subject_id = NA_character_,
+    group      = "agent",
+    source     = "agent"
+  )
+
+combined_df_no_cn <- human_df %>%
+  dplyr::select(subject_id, group, phase, case, score) %>%
+  mutate(source = "human") %>%
+  filter(group != "cn") %>%
+  bind_rows(agent_combined) %>%
+  mutate(
+    group = factor(
+      group,
+      levels = c(
+        "agent", "ai", "sf", "ai+sf", "sf-ai", "ai-sf"
+      )
+    )
+  )
+
+# ══════════════════════════════════════════════════════════════
+# 5. Descriptive statistics
+# ══════════════════════════════════════════════════════════════
+cat("========== Descriptives: Human groups × Phase accuracy ==========\n")
+
+desc_human <- human_df %>%
+  group_by(group, phase) %>%
+  summarise(
+    n    = n(),
+    mean = round(mean(score, na.rm = TRUE), 3),
+    sd   = round(sd(score, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+print(desc_human, n = Inf)
+
+cat("\n========== Descriptives: Agent × Phase accuracy ==========\n")
+
+desc_agent <- agent_df %>%
+  group_by(phase) %>%
+  summarise(
+    n    = n(),
+    mean = round(mean(score, na.rm = TRUE), 3),
+    sd   = round(sd(score, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+print(desc_agent)
+
+cat("\n========== Descriptives: Combined (human intervention groups + Agent) × Phase accuracy ==========\n")
+
+desc_combined <- combined_df_no_cn %>%
+  group_by(group, phase) %>%
+  summarise(
+    n    = n(),
+    mean = round(mean(score, na.rm = TRUE), 3),
+    sd   = round(sd(score, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+print(desc_combined, n = Inf)
+
+
+# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# Analysis 1: GLMM — Intervention groups vs CN group
+# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+
+model_df <- human_df %>%
+  mutate(
+    group = relevel(factor(group), ref = "cn"),
+    phase = factor(
+      phase,
+      levels = c(
+        "Phase1_Baseline",
+        "Phase2_PreInt",
+        "Phase3_PostInt",
+        "Phase4_Withdrawal"
+      )
+    )
+  )
+
+# ── Step 1: Model comparison — decide whether to include (1 | case) ──
+cat("\n========== Analysis 1: Model comparison — include (1|case)? ==========\n")
+
+m1_with_case <- glmer(
+  score ~ group * phase + (1 | subject_id) + (1 | case),
+  data    = model_df,
+  family  = binomial,
+  control = glmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 1e5)
+  )
+)
+
+m1_no_case <- glmer(
+  score ~ group * phase + (1 | subject_id),
+  data    = model_df,
+  family  = binomial,
+  control = glmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 1e5)
+  )
+)
+
+cat("\n── Likelihood ratio test ──\n")
+print(anova(m1_no_case, m1_with_case))
+
+cat("\n── AIC comparison ──\n")
+cat("AIC (no case)  :", round(AIC(m1_no_case), 3), "\n")
+cat("AIC (with case):", round(AIC(m1_with_case), 3), "\n")
+cat(
+  "ΔAIC =",
+  round(AIC(m1_no_case) - AIC(m1_with_case), 3),
+  "\n"
+)
+
+cat("\n── Singular fit check ──\n")
+cat("isSingular (with case):", isSingular(m1_with_case), "\n")
+
+cat("\n── ICC ──\n")
+print(icc(m1_with_case))
+
+# ── Step 2：Final model ─────────────────────────────────────────
+m_main <- m1_with_case
+
+cat("\n========== Analysis 1: GLMM model summary ==========\n")
+print(summary(m_main))
+
+cat("\n========== Analysis 1: Type III ANOVA ==========\n")
+print(Anova(m_main, type = "III"))
+
+# ── Fixed-effect OR table
+cat("\n========== Analysis 1: Fixed-effect OR table ==========\n")
+
+fe_ci <- confint(
+  m_main,
+  method = "Wald",
+  parm = "beta_"
+)
+
+fe_table <- cbind(
+  OR       = exp(fixef(m_main)),
+  CI_lower = exp(fe_ci[, 1]),
+  CI_upper = exp(fe_ci[, 2])
+) %>%
+  as.data.frame() %>%
+  round(3)
+
+print(fe_table)
+
+# ── Marginal predicted probability table
+cat("\n========== Analysis 1: Marginal predicted probabilities (group × phase) ==========\n")
+
+emm_prob_1 <- emmeans(
+  m_main,
+  ~ group * phase,
+  type = "response"
+)
+
+print(
+  summary(
+    emm_prob_1,
+    infer = TRUE,
+    adjust = "none"
+  )
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# Analysis 1 post-hoc comparisons:
+# Each group vs CN (p-values adjusted separately within each Phase)
+#
+# p-values: BH-adjusted
+# 95% CI: standard unadjusted pointwise CI
+# ══════════════════════════════════════════════════════════════
+
+emm_vs_cn <- emmeans(
+  m_main,
+  ~ group | phase,
+  type = "response"
+)
+
+contrast_vs_cn <- contrast(
+  emm_vs_cn,
+  method = "trt.vs.ctrl",
+  ref = "cn"
+)
+
+# BH-adjusted p-values
+contrast_vs_cn_test <- as.data.frame(
+  summary(
+    contrast_vs_cn,
+    infer  = c(FALSE, TRUE),
+    adjust = "BH"
+  )
+)
+
+# Unadjusted pointwise 95% CI
+contrast_vs_cn_ci <- as.data.frame(
+  confint(
+    contrast_vs_cn,
+    level  = 0.95,
+    adjust = "none"
+  )
+)
+
+contrast_vs_cn_full <- contrast_vs_cn_test %>%
+  dplyr::select(
+    -any_of(c("asymp.LCL", "asymp.UCL", "lower.CL", "upper.CL"))
+  ) %>%
+  left_join(
+    contrast_vs_cn_ci %>%
+      dplyr::select(
+        contrast,
+        phase,
+        any_of(c(
+          "asymp.LCL",
+          "asymp.UCL",
+          "lower.CL",
+          "upper.CL"
+        ))
+      ),
+    by = c("contrast", "phase")
+  )
+
+cat("\n========== Analysis 1 post-hoc (each group vs CN) — Phase 1 Baseline ==========\n")
+print(
+  contrast_vs_cn_full %>%
+    filter(phase == "Phase1_Baseline")
+)
+
+cat("\n========== Analysis 1 post-hoc (each group vs CN) — Phase 2 Pre-intervention ==========\n")
+print(
+  contrast_vs_cn_full %>%
+    filter(phase == "Phase2_PreInt")
+)
+
+cat("\n========== Analysis 1 post-hoc (each group vs CN) — Phase 3 Post-intervention ==========\n")
+print(
+  contrast_vs_cn_full %>%
+    filter(phase == "Phase3_PostInt")
+)
+
+cat("\n========== Analysis 1 post-hoc (each group vs CN) — Phase 4 Withdrawal ==========\n")
+print(
+  contrast_vs_cn_full %>%
+    filter(phase == "Phase4_Withdrawal")
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# Analysis 1 post-hoc comparisons:
+# Pairwise comparisons among human groups (p-values adjusted separately within each Phase)
+#
+# p-values: BH-adjusted
+# 95% CI: standard unadjusted pointwise CI
+# ══════════════════════════════════════════════════════════════
+
+cat("\n========== Analysis 1 post-hoc: Pairwise comparisons among human groups ==========\n")
+
+contrast_pairwise <- contrast(
+  emm_vs_cn,
+  method = "pairwise"
+)
+
+# BH-adjusted p-values
+contrast_pairwise_test <- as.data.frame(
+  summary(
+    contrast_pairwise,
+    infer  = c(FALSE, TRUE),
+    adjust = "BH"
+  )
+)
+
+# Unadjusted pointwise 95% CI
+contrast_pairwise_ci <- as.data.frame(
+  confint(
+    contrast_pairwise,
+    level  = 0.95,
+    adjust = "none"
+  )
+)
+
+contrast_pairwise_full <- contrast_pairwise_test %>%
+  dplyr::select(
+    -any_of(c("asymp.LCL", "asymp.UCL", "lower.CL", "upper.CL"))
+  ) %>%
+  left_join(
+    contrast_pairwise_ci %>%
+      dplyr::select(
+        contrast,
+        phase,
+        any_of(c(
+          "asymp.LCL",
+          "asymp.UCL",
+          "lower.CL",
+          "upper.CL"
+        ))
+      ),
+    by = c("contrast", "phase")
+  )
+
+cat("\n── Phase 1 Baseline ──\n")
+print(
+  contrast_pairwise_full %>%
+    filter(phase == "Phase1_Baseline")
+)
+
+cat("\n── Phase 2 Pre-intervention ──\n")
+print(
+  contrast_pairwise_full %>%
+    filter(phase == "Phase2_PreInt")
+)
+
+cat("\n── Phase 3 Post-intervention ──\n")
+print(
+  contrast_pairwise_full %>%
+    filter(phase == "Phase3_PostInt")
+)
+
+cat("\n── Phase 4 Withdrawal ──\n")
+print(
+  contrast_pairwise_full %>%
+    filter(phase == "Phase4_Withdrawal")
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# Analysis 1 post-hoc comparisons:
+# Each Phase vs Baseline within each group
+#
+# p-values: BH-adjusted (within each group)
+# 95% CI: standard unadjusted pointwise CI
+# ══════════════════════════════════════════════════════════════
+
+emm_vs_baseline <- emmeans(
+  m_main,
+  ~ phase | group,
+  type = "response"
+)
+
+contrast_vs_baseline <- contrast(
+  emm_vs_baseline,
+  method = "trt.vs.ctrl",
+  ref = "Phase1_Baseline"
+)
+
+# BH-adjusted p-values
+contrast_vs_baseline_test <- as.data.frame(
+  summary(
+    contrast_vs_baseline,
+    infer  = c(FALSE, TRUE),
+    adjust = "BH"
+  )
+)
+
+# Unadjusted pointwise 95% CI
+contrast_vs_baseline_ci <- as.data.frame(
+  confint(
+    contrast_vs_baseline,
+    level  = 0.95,
+    adjust = "none"
+  )
+)
+
+contrast_vs_baseline_full <- contrast_vs_baseline_test %>%
+  dplyr::select(
+    -any_of(c("asymp.LCL", "asymp.UCL", "lower.CL", "upper.CL"))
+  ) %>%
+  left_join(
+    contrast_vs_baseline_ci %>%
+      dplyr::select(
+        contrast,
+        group,
+        any_of(c(
+          "asymp.LCL",
+          "asymp.UCL",
+          "lower.CL",
+          "upper.CL"
+        ))
+      ),
+    by = c("contrast", "group")
+  )
+
+cat("\n========== Analysis 1 post-hoc (each Phase vs Baseline) — Phase 2 Pre-intervention ==========\n")
+print(
+  contrast_vs_baseline_full %>%
+    filter(
+      contrast == "Phase2_PreInt / Phase1_Baseline"
+    )
+)
+
+cat("\n========== Analysis 1 post-hoc (each Phase vs Baseline) — Phase 3 Post-intervention ==========\n")
+print(
+  contrast_vs_baseline_full %>%
+    filter(
+      contrast == "Phase3_PostInt / Phase1_Baseline"
+    )
+)
+
+cat("\n========== Analysis 1 post-hoc (each Phase vs Baseline) — Phase 4 Withdrawal ==========\n")
+print(
+  contrast_vs_baseline_full %>%
+    filter(
+      contrast == "Phase4_Withdrawal / Phase1_Baseline"
+    )
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# Analysis 2: GLMM — Intervention groups vs Agent group
+# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+
+# ── Step 1: Model comparison — decide whether to include (1 | case) ──
+cat("\n========== Analysis 2: Model comparison — include (1|case)? ==========\n")
+
+
+m2_with_case <- glmer(
+  score ~ group * phase + (1 | case),
+  data    = combined_df_no_cn,
+  family  = binomial,
+  control = glmerControl(
+    optimizer = "bobyqa"
+  )
+)
+
+m2_no_case <- glm(
+  score ~ group * phase,
+  data   = combined_df_no_cn,
+  family = binomial
+)
+
+cat("\n── Likelihood ratio test ──\n")
+
+ll_no_case   <- logLik(m2_no_case)
+ll_with_case <- logLik(m2_with_case)
+
+chisq_stat <- 2 * (
+  as.numeric(ll_with_case) -
+    as.numeric(ll_no_case)
+)
+
+df_diff <- attr(ll_with_case, "df") -
+  attr(ll_no_case, "df")
+
+p_value <- pchisq(
+  chisq_stat,
+  df = df_diff,
+  lower.tail = FALSE
+)
+
+cat(
+  "logLik (no case)  :",
+  round(as.numeric(ll_no_case), 3),
+  "\n"
+)
+
+cat(
+  "logLik (with case):",
+  round(as.numeric(ll_with_case), 3),
+  "\n"
+)
+
+cat(
+  "Chisq =",
+  round(chisq_stat, 3),
+  " df =",
+  df_diff,
+  " p =",
+  format.pval(p_value, digits = 3),
+  "\n"
+)
+
+cat(
+  "AIC (no case)  :",
+  round(AIC(m2_no_case), 3),
+  "\n"
+)
+
+cat(
+  "AIC (with case):",
+  round(AIC(m2_with_case), 3),
+  "\n"
+)
+
+cat(
+  "ΔAIC =",
+  round(AIC(m2_no_case) - AIC(m2_with_case), 3),
+  "\n"
+)
+
+cat("\n── Singular fit check ──\n")
+cat(
+  "isSingular (with case):",
+  isSingular(m2_with_case),
+  "\n"
+)
+
+cat("\n── ICC ──\n")
+print(icc(m2_with_case))
+
+# ── Step 2: Final model ──────────────────────────────────────
+fit_global <- m2_with_case
+
+cat("\n========== Analysis 2: GLMM model summary ==========\n")
+print(summary(fit_global))
+
+cat("\n========== Analysis 2: Type III ANOVA ==========\n")
+print(Anova(fit_global, type = "III"))
+
+# ── Fixed-effect OR table
+cat("\n========== Analysis 2: Fixed-effect OR table ==========\n")
+
+glm_ci <- confint(
+  fit_global,
+  method = "Wald",
+  parm = "beta_"
+)
+
+glm_or_table <- cbind(
+  OR       = exp(fixef(fit_global)),
+  CI_lower = exp(glm_ci[, 1]),
+  CI_upper = exp(glm_ci[, 2])
+) %>%
+  as.data.frame() %>%
+  round(3)
+
+print(glm_or_table)
+
+# ── Marginal predicted probability table
+cat("\n========== Analysis 2: Marginal predicted probabilities (group × phase) ==========\n")
+
+emm_prob_2 <- emmeans(
+  fit_global,
+  ~ group * phase,
+  type = "response"
+)
+
+print(
+  summary(
+    emm_prob_2,
+    infer = TRUE,
+    adjust = "none"
+  )
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# Analysis 2 post-hoc comparisons:
+# Each group vs Agent (p-values adjusted separately within each Phase)
+#
+# p-values: BH-adjusted
+# 95% CI: standard unadjusted pointwise CI
+# ══════════════════════════════════════════════════════════════
+
+emm_vs_agent <- emmeans(
+  fit_global,
+  ~ group | phase,
+  type = "response"
+)
+
+contrast_vs_agent <- contrast(
+  emm_vs_agent,
+  method = "trt.vs.ctrl",
+  ref = "agent"
+)
+
+# BH-adjusted p-values
+contrast_vs_agent_test <- as.data.frame(
+  summary(
+    contrast_vs_agent,
+    infer  = c(FALSE, TRUE),
+    adjust = "BH"
+  )
+)
+
+# Unadjusted pointwise 95% CI
+contrast_vs_agent_ci <- as.data.frame(
+  confint(
+    contrast_vs_agent,
+    level  = 0.95,
+    adjust = "none"
+  )
+)
+
+contrast_vs_agent_full <- contrast_vs_agent_test %>%
+  dplyr::select(
+    -any_of(c("asymp.LCL", "asymp.UCL", "lower.CL", "upper.CL"))
+  ) %>%
+  left_join(
+    contrast_vs_agent_ci %>%
+      dplyr::select(
+        contrast,
+        phase,
+        any_of(c(
+          "asymp.LCL",
+          "asymp.UCL",
+          "lower.CL",
+          "upper.CL"
+        ))
+      ),
+    by = c("contrast", "phase")
+  )
+
+cat("\n========== Analysis 2 post-hoc (each group vs Agent) — Phase 1 Baseline ==========\n")
+print(
+  contrast_vs_agent_full %>%
+    filter(phase == "Phase1_Baseline")
+)
+
+cat("\n========== Analysis 2 post-hoc (each group vs Agent) — Phase 2 Pre-intervention ==========\n")
+print(
+  contrast_vs_agent_full %>%
+    filter(phase == "Phase2_PreInt")
+)
+
+cat("\n========== Analysis 2 post-hoc (each group vs Agent) — Phase 3 Post-intervention ==========\n")
+print(
+  contrast_vs_agent_full %>%
+    filter(phase == "Phase3_PostInt")
+)
+
+cat("\n========== Analysis 2 post-hoc (each group vs Agent) — Phase 4 Withdrawal ==========\n")
+print(
+  contrast_vs_agent_full %>%
+    filter(phase == "Phase4_Withdrawal")
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# Analysis 2 post-hoc comparisons:
+# Each Phase vs Baseline within each group
+#
+# p-values: BH-adjusted (within each group)
+# 95% CI: standard unadjusted pointwise CI
+# ══════════════════════════════════════════════════════════════
+
+emm_vs_baseline2 <- emmeans(
+  fit_global,
+  ~ phase | group,
+  type = "response"
+)
+
+contrast_vs_baseline2 <- contrast(
+  emm_vs_baseline2,
+  method = "trt.vs.ctrl",
+  ref = "Phase1_Baseline"
+)
+
+# BH-adjusted p-values
+contrast_vs_baseline2_test <- as.data.frame(
+  summary(
+    contrast_vs_baseline2,
+    infer  = c(FALSE, TRUE),
+    adjust = "BH"
+  )
+)
+
+# Unadjusted pointwise 95% CI
+contrast_vs_baseline2_ci <- as.data.frame(
+  confint(
+    contrast_vs_baseline2,
+    level  = 0.95,
+    adjust = "none"
+  )
+)
+
+contrast_vs_baseline2_full <- contrast_vs_baseline2_test %>%
+  dplyr::select(
+    -any_of(c("asymp.LCL", "asymp.UCL", "lower.CL", "upper.CL"))
+  ) %>%
+  left_join(
+    contrast_vs_baseline2_ci %>%
+      dplyr::select(
+        contrast,
+        group,
+        any_of(c(
+          "asymp.LCL",
+          "asymp.UCL",
+          "lower.CL",
+          "upper.CL"
+        ))
+      ),
+    by = c("contrast", "group")
+  )
+
+cat("\n========== Analysis 2 post-hoc (each Phase vs Baseline) — Phase 2 Pre-intervention ==========\n")
+print(
+  contrast_vs_baseline2_full %>%
+    filter(
+      contrast == "Phase2_PreInt / Phase1_Baseline"
+    )
+)
+
+cat("\n========== Analysis 2 post-hoc (each Phase vs Baseline) — Phase 3 Post-intervention ==========\n")
+print(
+  contrast_vs_baseline2_full %>%
+    filter(
+      contrast == "Phase3_PostInt / Phase1_Baseline"
+    )
+)
+
+cat("\n========== Analysis 2 post-hoc (each Phase vs Baseline) — Phase 4 Withdrawal ==========\n")
+print(
+  contrast_vs_baseline2_full %>%
+    filter(
+      contrast == "Phase4_Withdrawal / Phase1_Baseline"
+    )
+)
+
+```
+
+
+# RQ1.2: SF vs. noSF
+```{r}
+# ══════════════════════════════════════════════════════════════
+# "Initial Protected-Scaffolding" vs "Initial Direct-Answer Availability"
+#
+# SF-led:
+#   sf      = +1/2
+#   sf-ai   = +1/2
+#
+# noSF-led:
+#   ai      = -1/3
+#   ai+sf   = -1/3
+#   ai-sf   = -1/3
+#
+# ══════════════════════════════════════════════════════════════
+
+# ── Step 1: Extract EMMs for each group within each phase ─────
+emm_group_phase <- emmeans(m_main, ~ group | phase, type = "response")
+
+# Confirm group order (the weight vector must match this order)
+cat("── Group order check ──\n")
+print(as.data.frame(emm_group_phase)[, c("group", "phase")] %>%
+  filter(phase == "Phase1_Baseline"))
+
+# ── Step 2: Define contrast weights ───────────────────────────
+# Group order (from levels): cn, ai, sf, ai+sf, sf-ai, ai-sf
+# Corresponding weights:      0, -1/3, +1/2, -1/3, +1/2, -1/3
+
+protected_sf_contrast <- list(
+  "Protected-Scaffolding vs Direct-Answer" = c(
+     0,      # cn
+    -1/3,    # ai
+     1/2,    # sf
+    -1/3,    # ai+sf
+     1/2,    # sf-ai
+    -1/3     # ai-sf
+  )
+)
+
+# ── Step 3: Extract the contrast for each phase; BH correction (4 tests) ──
+contrast_ps_raw <- contrast(
+  emm_group_phase,
+  method = protected_sf_contrast,
+  adjust = "none"
+)
+
+contrast_ps_df <- as.data.frame(summary(contrast_ps_raw, infer = TRUE))
+contrast_ps_df$p.value.BH <- p.adjust(contrast_ps_df$p.value, method = "BH")
+
+ci_cols <- grep("LCL|UCL", names(contrast_ps_df), value = TRUE)
+
+cat("\n========== Initial Protected-Scaffolding Contrast (BH-corrected, 4 tests) ==========\n")
+cat("OR > 1: SF-led groups perform significantly better than noSF-led groups\n\n")
+print(contrast_ps_df %>%
+  dplyr::select(phase, contrast, odds.ratio, SE,
+                all_of(ci_cols), z.ratio, p.value, p.value.BH))
+
+# ── Step 4: Significance labels ───────────────────────────────
+fmt_sig <- function(p) dplyr::case_when(
+  p < .001 ~ "***",
+  p < .01  ~ "**",
+  p < .05  ~ "*",
+  TRUE     ~ "ns"
+)
+
+cat("\n── Significance summary ──\n")
+print(contrast_ps_df %>%
+  mutate(
+    p.value    = round(p.value, 4),
+    p.value.BH = round(p.value.BH, 4),
+    sig        = fmt_sig(p.value.BH)
+  ) %>%
+  dplyr::select(phase, odds.ratio, p.value, p.value.BH, sig))
+```
+
+# Export the table
+```{r}
+library(openxlsx)
+
+wb <- createWorkbook()
+
+# descriptive statistics
+addWorksheet(wb, "desc_human");   writeData(wb, "desc_human",   desc_human)
+addWorksheet(wb, "desc_agent");   writeData(wb, "desc_agent",   desc_agent)
+
+# A1
+addWorksheet(wb, "A1_emm_prob");        writeData(wb, "A1_emm_prob",        as.data.frame(summary(emm_prob_1, infer=TRUE)))
+addWorksheet(wb, "A1_vs_CN");           writeData(wb, "A1_vs_CN",           contrast_vs_cn_full)
+addWorksheet(wb, "A1_pairwise");        writeData(wb, "A1_pairwise",        contrast_pairwise_full)
+addWorksheet(wb, "A1_vs_baseline");     writeData(wb, "A1_vs_baseline",     contrast_vs_baseline_full)
+
+# A2
+addWorksheet(wb, "A2_emm_prob");        writeData(wb, "A2_emm_prob",        as.data.frame(summary(emm_prob_2, infer=TRUE)))
+addWorksheet(wb, "A2_vs_Agent");        writeData(wb, "A2_vs_Agent",        contrast_vs_agent_full)
+addWorksheet(wb, "A2_vs_baseline");     writeData(wb, "A2_vs_baseline",     contrast_vs_baseline2_full)
+
+saveWorkbook(wb, "GLMM_results_P1-P4.xlsx", overwrite = TRUE)
+
+```
+
+
+# Draw pictures
+```{r}
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(patchwork)
+library(showtext)
+library(cowplot)
+library(ggh4x)
+
+font_add(
+  family     = "Arial",
+  regular    = "/Library/Fonts/Arial.ttf",
+  bold       = "/Library/Fonts/Arial Bold.ttf",
+  italic     = "/Library/Fonts/Arial Italic.ttf",
+  bolditalic = "/Library/Fonts/Arial Bold Italic.ttf"
+)
+showtext_auto()
+showtext_opts(dpi = 600)
+
+extract_contrast_df <- function(contrast_obj, ref_name) {
+
+  s <- as.data.frame(
+    summary(contrast_obj, infer = c(FALSE, TRUE), adjust = "BH")
+  )
+  
+  ci <- as.data.frame(
+    confint(contrast_obj, level = 0.95, adjust = "none")
+  )
+
+  df <- data.frame(
+    contrast  = s$contrast,
+    phase     = s$phase,
+    OR        = s$odds.ratio,
+    z         = s$z.ratio,
+    p         = s$p.value,        
+    CI_lower  = ci$asymp.LCL,
+    CI_upper  = ci$asymp.UCL
+  ) %>%
+    mutate(
+      sig = case_when(
+        p < .001 ~ "***",
+        p < .01  ~ "**",
+        p < .05  ~ "*",
+        TRUE     ~ ""
+      ),
+      significant = p < .05,
+      group_label = gsub(paste0(" / ", ref_name), "", contrast),
+      group_label = gsub("[()]", "", group_label),
+      group_label = trimws(group_label),
+      group_label = factor(group_label,
+                           levels = c("ai", "sf", "sf-ai", "ai-sf", "ai+sf"))
+    ) %>%
+    filter(phase != "Phase5_Tool")
+
+  message(sprintf("[extract] ref=%s, total rows=%d, groups=%s",
+                  ref_name, nrow(df),
+                  paste(levels(droplevels(df$group_label)), collapse = ", ")))
+  return(df)
+}
+
+
+df_cn    <- extract_contrast_df(contrast_vs_cn,    ref_name = "cn")
+df_agent <- extract_contrast_df(contrast_vs_agent, ref_name = "agent")
+
+
+group_colors <- c(
+  "ai"    = "#AA2B46",
+  "sf"    = "#6CB3DA",
+  "sf-ai" = "#3B5DA3",
+  "ai-sf" = "#E58760",
+  "ai+sf" = "#F6DEA4"
+)
+
+
+group_labels <- c(
+  "ai"    = "ASST",
+  "sf"    = "SF",
+  "sf-ai" = "SF-ASST",
+  "ai-sf" = "ASST-SF",
+  "ai+sf" = "SF+ASST"
+)
+
+
+phase_labels <- c(
+  "Phase1_Baseline"   = "P1: AI-free\nBaseline",
+  "Phase2_PreInt"     = "P2: Initial\nIntervention",
+  "Phase3_PostInt"    = "P3: Subsequent\nIntervention",
+  "Phase4_Withdrawal" = "P4: Support\nWithdrawal"
+)
+
+
+phase_strip_fills <- list(
+  element_rect(fill = "#D6D6D6", color = NA),
+  element_rect(fill = "#BDD7EE", color = NA),
+  element_rect(fill = "#BDD7EE", color = NA),
+  element_rect(fill = "#C5E0B4", color = NA)
+)
+
+
+group_order <- c("ai", "sf", "sf-ai", "ai-sf", "ai+sf")
+
+df_cn$phase_label    <- factor(phase_labels[df_cn$phase],    levels = phase_labels)
+df_agent$phase_label <- factor(phase_labels[df_agent$phase], levels = phase_labels)
+
+df_cn    <- df_cn    %>% mutate(group_label = factor(group_label, levels = group_order))
+df_agent <- df_agent %>% mutate(group_label = factor(group_label, levels = group_order))
+
+
+plot_forest <- function(df) {
+  base_pt   <- 8
+  cap_value <- 500
+
+  df <- df %>% mutate(
+    CI_upper_plot = pmin(CI_upper, cap_value),
+    arrow_right   = CI_upper > cap_value,
+    group_display = factor(
+      group_labels[as.character(group_label)],
+      levels = unname(group_labels[group_order])
+    )
+  )
+  df_sig <- filter(df, significant)
+
+  ggplot(df, aes(x = OR, y = fct_rev(group_display), color = group_label)) +
+    geom_vline(xintercept = 1, linetype = "dashed",
+               color = "grey50", linewidth = 0.35) +
+    geom_errorbarh(
+      aes(xmin = CI_lower, xmax = CI_upper_plot, alpha = significant),
+      height = 0.3, linewidth = 1.0
+    ) +
+    scale_alpha_manual(values = c("TRUE" = 1.0, "FALSE" = 0.15)) +
+    geom_segment(
+      data = filter(df, arrow_right),
+      aes(x = CI_upper_plot, xend = CI_upper_plot * 1.06,
+          y = fct_rev(group_display), yend = fct_rev(group_display)),
+      arrow = arrow(length = unit(0.12, "cm"), type = "closed"),
+      linewidth = 1.0, inherit.aes = TRUE
+    ) +
+    geom_point(aes(shape = significant, size = significant, alpha = significant)) +
+    scale_shape_manual(values = c("TRUE" = 18, "FALSE" = 16)) +
+    scale_size_manual(values  = c("TRUE" = 3.0, "FALSE" = 2.0)) +
+    geom_text(
+      data = df_sig,
+      aes(x = OR, y = fct_rev(group_display), label = sig, color = group_label),
+      hjust = -0.3, vjust = 0.4,
+      size  = 4.5 / .pt * 2.5, family = "Arial",
+      inherit.aes = FALSE
+    ) +
+    scale_color_manual(values = group_colors, labels = group_labels) +
+    facet_grid2(
+      . ~ phase_label,
+      scales = "free_x",
+      strip  = strip_themed(background_x = phase_strip_fills)
+    ) +
+    scale_x_log10(
+      breaks = c(0.1, 0.25, 0.5, 1, 2, 5, 10, 50, 200),
+      labels = c("0.1", "0.25", "0.5", "1", "2", "5", "10", "50", "200")
+    ) +
+    labs(x = "Odds Ratio (log scale)", y = NULL) +
+    guides(color = "none", shape = "none", size = "none", alpha = "none") +
+    theme_classic(base_size = base_pt, base_family = "Arial") +
+    theme(
+      axis.title.x       = element_text(size = base_pt, color = "black"),
+      axis.text.x        = element_text(size = base_pt, color = "black"),
+      axis.text.y        = element_text(size = base_pt, color = "black", face = "bold"),
+      axis.line          = element_line(linewidth = 0.3, color = "black"),
+      axis.ticks         = element_line(linewidth = 0.3, color = "black"),
+      strip.text         = element_text(size = base_pt, family = "Arial",   
+                                        color = "black", lineheight = 0.85,
+                                        face = "bold"),
+      panel.grid.major.x = element_line(color = "gray90", linetype = "dotted",
+                                        linewidth = 0.3),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor   = element_blank(),
+      panel.spacing      = unit(3, "pt"),
+      legend.position    = "none",
+      plot.background    = element_blank(),
+      plot.margin        = margin(4, 6, 2, 4, "pt"),
+      panel.clip         = "off"
+    )
+}
+
+
+legend_df <- data.frame(
+  g = factor(group_order, levels = group_order),
+  x = seq_along(group_order),
+  y = 1
+)
+
+legend_only_plot <- ggplot(legend_df, aes(x = x, y = y, color = g)) +
+  geom_point(size = 3) +
+  scale_color_manual(
+    values = group_colors,
+    labels = unname(group_labels[group_order]),
+    breaks = group_order
+  ) +
+  guides(
+    color = guide_legend(
+      nrow         = 1,
+      keywidth     = unit(10, "pt"),   
+      keyheight    = unit(8,  "pt"),
+      label.hjust  = 0,                
+      byrow        = TRUE,
+      override.aes = list(size = 3)
+    )
+  ) +
+  labs(color = NULL) +
+  theme(
+    line              = element_blank(),
+    rect              = element_blank(),
+    text              = element_blank(),
+    axis.text         = element_blank(),
+    axis.title        = element_blank(),
+    axis.ticks        = element_blank(),
+    axis.line         = element_blank(),
+    panel.background  = element_blank(),
+    panel.border      = element_blank(),
+    panel.grid        = element_blank(),
+    plot.background   = element_blank(),
+    plot.margin       = margin(0, 0, 0, 0),
+    legend.position   = "bottom",
+    legend.direction  = "horizontal",
+    legend.text       = element_text(size = 7, family = "Arial",
+                                     color = "black",
+                                     margin = margin(r = 12, l = 2, unit = "pt")), 
+    legend.key        = element_blank(),
+    legend.key.size   = unit(8,  "pt"),
+    legend.spacing.x  = unit(2,  "pt"),   
+    legend.margin     = margin(0, 0, 0, 0),
+    legend.background = element_blank()
+  )
+
+shared_legend <- get_legend(legend_only_plot)
+
+
+p1 <- plot_forest(df_cn)
+p2 <- plot_forest(df_agent)
+
+combined_plot <- (p1 / p2) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(tag_levels = "a") &
+  theme(
+    plot.background   = element_blank(),
+    plot.tag          = element_text(size = 12, face = "bold",
+                                     family = "Arial", color = "black"),
+    plot.tag.position = "topleft"
+  )
+
+fig_width_in  <- 183 / 25.4
+fig_height_in <- 150 / 25.4
+
+final_plot <- ggdraw(ylim = c(0, 1)) +
+  draw_plot(combined_plot, x = 0, y = 0.07, width = 1, height = 0.93) +
+  draw_plot(shared_legend, x = 0, y = 0,    width = 1, height = 0.07)
+
+
+ggsave(
+  "forest_plot.png",
+  plot   = final_plot,
+  width  = fig_width_in,
+  height = fig_height_in,
+  dpi    = 600,
+  units  = "in"
+)
+
+ggsave(
+  "forest_plot.pdf",
+  plot   = final_plot,
+  width  = fig_width_in,
+  height = fig_height_in,
+  device = cairo_pdf,
+  units  = "in"
+)
+
+cat("Saved：forest_plot.png / .pdf\n")
+```
+
+
+
+
